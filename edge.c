@@ -203,7 +203,7 @@ static int readConfFile(const char * filename, char * const linebuffer) {
         /* strip out heading spaces */
         p = buffer;
         while (*p == ' ') ++p;
-        if (p != buffer) strcpy(buffer, p);
+        if (p != buffer) memmove(buffer, p, strlen(p) + 1);
 
         /* strip out trailing spaces */
         while(strlen(buffer) && buffer[strlen(buffer)-1]==' ')
@@ -217,8 +217,16 @@ static int readConfFile(const char * filename, char * const linebuffer) {
             return -1;
         }
         if ((strlen(linebuffer) + strlen(buffer) + 2)< MAX_CMDLINE_BUFFER_LENGTH) {
-            strcat(linebuffer, " ");
-            strcat(linebuffer, buffer);
+            size_t current_len = strlen(linebuffer);
+            if (current_len + 1 < MAX_CMDLINE_BUFFER_LENGTH) {
+                linebuffer[current_len] = ' ';
+                linebuffer[current_len + 1] = '\0';
+            }
+            size_t current_len = strlen(linebuffer);
+            size_t buffer_len = strlen(buffer);
+            if (current_len + buffer_len + 1 < MAX_CMDLINE_BUFFER_LENGTH) {
+                memcpy(linebuffer + current_len, buffer, buffer_len + 1);
+            }
         } else {
             traceEvent(TRACE_ERROR, "too many arguments");
             free(buffer);
@@ -287,7 +295,7 @@ static char ** buildargv(int * effectiveargc, char * const linebuffer) {
         return NULL;
     }
 
-    strcpy(buffer, linebuffer);
+    memcpy(buffer, linebuffer, strlen(linebuffer) + 1);
 
     maxargc = INITIAL_MAXARGC;
     argv = (char **)malloc(maxargc * sizeof(char*));

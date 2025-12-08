@@ -378,7 +378,15 @@ static int edge_init(n2n_edge_t * eee)
 /** Called in main() after options are parsed. */
 static int edge_init_twofish( n2n_edge_t * eee, uint8_t *encrypt_pwd, uint64_t encrypt_pwd_len )
 {
-    return transop_twofish_setup( &(eee->transop[N2N_TRANSOP_TF_IDX]), 0, encrypt_pwd, encrypt_pwd_len );
+    int retval;
+
+    retval = transop_twofish_setup( &(eee->transop[N2N_TRANSOP_TF_IDX]), 0, encrypt_pwd, encrypt_pwd_len );
+
+    if (retval == 0) {
+        eee->tx_transop_idx = N2N_TRANSOP_TF_IDX;
+    }
+
+    return retval;
 }
 
 static int edge_init_aes( n2n_edge_t * eee, uint8_t *encrypt_pwd, uint64_t encrypt_pwd_len )
@@ -2637,6 +2645,11 @@ int main(int argc, char* argv[])
         }
 
         } /* end switch */
+    }
+
+    if (encrypt_key && encrypt_mode == 1) {
+        encrypt_mode = 2;
+        traceEvent(TRACE_NORMAL, "Using default Twofish encryption (B2) for provided key\n");
     }
 
 #ifdef HAVE_LIBCAP

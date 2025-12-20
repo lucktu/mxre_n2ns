@@ -13,7 +13,7 @@
 #include "n2n_wire.h"
 #include <string.h>
 
-size_t encode_uint8( uint8_t * base, 
+size_t encode_uint8( uint8_t * base,
                   size_t * idx,
                   const uint8_t v )
 {
@@ -35,7 +35,7 @@ size_t decode_uint8( uint8_t * out,
     return 1;
 }
 
-size_t encode_uint16( uint8_t * base, 
+size_t encode_uint16( uint8_t * base,
                    size_t * idx,
                    const uint16_t v )
 {
@@ -59,7 +59,7 @@ size_t decode_uint16( uint16_t * out,
     return 2;
 }
 
-size_t encode_uint32( uint8_t * base, 
+size_t encode_uint32( uint8_t * base,
                    size_t * idx,
                    const uint32_t v )
 {
@@ -87,9 +87,9 @@ size_t decode_uint32( uint32_t * out,
     return 4;
 }
 
-size_t encode_buf( uint8_t * base, 
+size_t encode_buf( uint8_t * base,
                 size_t * idx,
-                const void * p, 
+                const void * p,
                 size_t s)
 {
     memcpy( (base + (*idx)), p, s );
@@ -114,7 +114,7 @@ size_t decode_buf( uint8_t * out,
 
 
 
-size_t encode_mac( uint8_t * base, 
+size_t encode_mac( uint8_t * base,
                 size_t * idx,
                 const n2n_mac_t m )
 {
@@ -131,7 +131,7 @@ size_t decode_mac( uint8_t * out, /* of size N2N_MAC_SIZE. This clearer than pas
 
 
 
-ssize_t encode_common( uint8_t * base, 
+ssize_t encode_common( uint8_t * base,
                    size_t * idx,
                    const n2n_common_t * common )
 {
@@ -144,7 +144,7 @@ ssize_t encode_common( uint8_t * base,
 
     encode_uint16( base, idx, flags );
     encode_buf( base, idx, common->community, N2N_COMMUNITY_SIZE );
-    
+
     return -1;
 }
 
@@ -161,7 +161,7 @@ ssize_t decode_common( n2n_common_t * out,
     {
         return -1;
     }
-    
+
     decode_uint8( &(out->ttl), base, rem, idx );
     decode_uint16( &(out->flags), base, rem, idx );
     out->pc = (n2n_pc_t) ( out->flags & N2N_FLAGS_TYPE_MASK );
@@ -173,14 +173,14 @@ ssize_t decode_common( n2n_common_t * out,
 }
 
 
-ssize_t encode_sock( uint8_t * base, 
+ssize_t encode_sock( uint8_t * base,
                  size_t * idx,
                  const n2n_sock_t * sock )
 {
     ssize_t retval=0;
     uint16_t f;
 
-    switch (sock->family) 
+    switch (sock->family)
     {
     case AF_INET:
     {
@@ -213,7 +213,7 @@ ssize_t decode_sock( n2n_sock_t * sock,
 {
     size_t * idx0=idx;
     uint16_t f;
-    
+
     decode_uint16( &f, base, rem, idx );
 
     if( f & 0x8000 )
@@ -235,9 +235,9 @@ ssize_t decode_sock( n2n_sock_t * sock,
     return (idx-idx0);
 }
 
-size_t encode_REGISTER( uint8_t * base, 
+size_t encode_REGISTER( uint8_t * base,
                      size_t * idx,
-                     const n2n_common_t * common, 
+                     const n2n_common_t * common,
                      const n2n_REGISTER_t * reg )
 {
     size_t retval=0;
@@ -250,11 +250,14 @@ size_t encode_REGISTER( uint8_t * base,
         retval += encode_sock( base, idx, &(reg->sock) );
     }
 
+    retval += encode_buf( base, idx, reg->version, 16 );
+    retval += encode_buf( base, idx, reg->os_name, 16 );
+
     return retval;
 }
 
 size_t decode_REGISTER( n2n_REGISTER_t * reg,
-                     const n2n_common_t * cmn, /* info on how to interpret it */
+                     const n2n_common_t * cmn,
                      const uint8_t * base,
                      size_t * rem,
                      size_t * idx )
@@ -270,12 +273,24 @@ size_t decode_REGISTER( n2n_REGISTER_t * reg,
         retval += decode_sock( &(reg->sock), base, rem, idx );
     }
 
+    if (*rem >= 16) {
+        retval += decode_buf( reg->version, 16, base, rem, idx );
+    } else {
+        strcpy(reg->version, "unknown");
+    }
+
+    if (*rem >= 16) {
+        retval += decode_buf( reg->os_name, 16, base, rem, idx );
+    } else {
+        strcpy(reg->os_name, "unknown");
+    }
+
     return retval;
 }
 
-size_t encode_REGISTER_SUPER( uint8_t * base, 
+size_t encode_REGISTER_SUPER( uint8_t * base,
                            size_t * idx,
-                           const n2n_common_t * common, 
+                           const n2n_common_t * common,
                            const n2n_REGISTER_SUPER_t * reg )
 {
     size_t retval=0;
@@ -284,12 +299,14 @@ size_t encode_REGISTER_SUPER( uint8_t * base,
     retval += encode_mac( base, idx, reg->edgeMac );
     retval += encode_uint16( base, idx, 0 ); /* NULL auth scheme */
     retval += encode_uint16( base, idx, 0 ); /* No auth data */
+    retval += encode_buf( base, idx, reg->version, 16 );
+    retval += encode_buf( base, idx, reg->os_name, 16 );
 
     return retval;
 }
 
 size_t decode_REGISTER_SUPER( n2n_REGISTER_SUPER_t * reg,
-                           const n2n_common_t * cmn, /* info on how to interpret it */
+                           const n2n_common_t * cmn,
                            const uint8_t * base,
                            size_t * rem,
                            size_t * idx )
@@ -301,12 +318,25 @@ size_t decode_REGISTER_SUPER( n2n_REGISTER_SUPER_t * reg,
     retval += decode_uint16( &(reg->auth.scheme), base, rem, idx );
     retval += decode_uint16( &(reg->auth.toksize), base, rem, idx );
     retval += decode_buf( reg->auth.token, reg->auth.toksize, base, rem, idx );
+
+    if (*rem >= 16) {
+        retval += decode_buf( reg->version, 16, base, rem, idx );
+    } else {
+        strcpy(reg->version, "unknown");
+    }
+
+    if (*rem >= 16) {
+        retval += decode_buf( reg->os_name, 16, base, rem, idx );
+    } else {
+        strcpy(reg->os_name, "unknown");
+    }
+
     return retval;
 }
 
-size_t encode_REGISTER_ACK( uint8_t * base, 
+size_t encode_REGISTER_ACK( uint8_t * base,
                          size_t * idx,
-                         const n2n_common_t * common, 
+                         const n2n_common_t * common,
                          const n2n_REGISTER_ACK_t * reg )
 {
     size_t retval=0;
@@ -366,6 +396,8 @@ size_t encode_REGISTER_SUPER_ACK( uint8_t * base,
         /* We only support 0 or 1 at this stage */
         retval += encode_sock( base, idx, &(reg->sn_bak) );
     }
+    retval += encode_buf( base, idx, reg->version, 16 );
+    retval += encode_buf( base, idx, reg->os_name, 16 );
 
     return retval;
 }
@@ -393,12 +425,14 @@ size_t decode_REGISTER_SUPER_ACK( n2n_REGISTER_SUPER_ACK_t * reg,
         /* We only support 0 or 1 at this stage */
         retval += decode_sock( &(reg->sn_bak), base, rem, idx );
     }
+    retval += decode_buf( reg->version, 16, base, rem, idx );
+    retval += decode_buf( reg->os_name, 16, base, rem, idx );
 
     return retval;
 }
 
-int fill_sockaddr( struct sockaddr * addr, 
-                   size_t addrlen, 
+int fill_sockaddr( struct sockaddr * addr,
+                   size_t addrlen,
                    const n2n_sock_t * sock )
 {
     int retval=-1;
@@ -427,9 +461,9 @@ int fill_sockaddr( struct sockaddr * addr,
 }
 
 
-size_t encode_PACKET( uint8_t * base, 
+size_t encode_PACKET( uint8_t * base,
                    size_t * idx,
-                   const n2n_common_t * common, 
+                   const n2n_common_t * common,
                    const n2n_PACKET_t * pkt )
 {
     size_t retval=0;

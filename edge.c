@@ -30,6 +30,11 @@
 #include "minilzo.h"
 #include "random.h"
 
+/* reallocarray compatibility for older glibc versions */
+#ifndef HAVE_REALLOCARRAY
+#define reallocarray(p, n, s) realloc((p), (n) * (s))
+#endif
+
 #ifdef N2N_HAVE_AES
 #include "aes.h"
 #if USE_OPENSSL
@@ -49,17 +54,10 @@ char const* gcrypt_version;
 #endif
 #endif
 
-#if defined(DEBUG)
-#define SOCKET_TIMEOUT_INTERVAL_SECS    5
-#define REGISTER_SUPER_INTERVAL_DFL     20 /* sec */
-#else  /* #if defined(DEBUG) */
-#define SOCKET_TIMEOUT_INTERVAL_SECS    10
-#define REGISTER_SUPER_INTERVAL_DFL     60 /* sec */
-#endif /* #if defined(DEBUG) */
-
+#define SOCKET_TIMEOUT_INTERVAL_SECS    10   /* sec */
+#define REGISTER_SUPER_INTERVAL_DFL     60   /* sec */
 #define REGISTER_SUPER_INTERVAL_MIN     30   /* sec */
 #define REGISTER_SUPER_INTERVAL_MAX     120  /* sec */
-
 #define IFACE_UPDATE_INTERVAL           (30) /* sec. How long it usually takes to get an IP lease. */
 #define TRANSOP_TICK_INTERVAL           (10) /* sec */
 
@@ -121,6 +119,7 @@ struct n2n_edge
     n2n_community_t     community_name;         /**< The community. 16 full octets. */
     char                keyschedule[N2N_PATHNAME_MAXLEN];
     int                 null_transop;           /**< Only allowed if no key sources defined. */
+    char                supernode_version[16];
 
     SOCKET              udp_sock;
     SOCKET              mgmt_sock;               /**< socket for status info. */
@@ -731,6 +730,9 @@ static void send_register( n2n_edge_t * eee,
     cmn.flags = 0;
     memcpy( cmn.community, eee->community_name, N2N_COMMUNITY_SIZE );
 
+    strncpy(reg.version, n2n_sw_version, sizeof(reg.version) - 1);
+    strncpy(reg.os_name, n2n_sw_osName, sizeof(reg.os_name) - 1);
+
     idx=0;
     encode_uint32( reg.cookie, &idx, 123456789 );
     idx=0;
@@ -742,9 +744,7 @@ static void send_register( n2n_edge_t * eee,
     traceEvent( TRACE_INFO, "send REGISTER %s",
         sock_to_cstr( sockbuf, remote_peer ) );
 
-
     sendto_sock( eee->udp_sock, pktbuf, idx, remote_peer );
-
 }
 
 
@@ -769,6 +769,9 @@ static void send_register_super( n2n_edge_t * eee,
 
     memcpy( reg.cookie, eee->last_cookie, N2N_COOKIE_SIZE );
     reg.auth.scheme=0; /* No auth yet */
+
+    strncpy(reg.version, n2n_sw_version, sizeof(reg.version) - 1);
+    strncpy(reg.os_name, n2n_sw_osName, sizeof(reg.os_name) - 1);
 
     idx=0;
     encode_mac( reg.edgeMac, &idx, eee->device.mac_addr );
@@ -838,7 +841,9 @@ static void update_peer_address(n2n_edge_t * eee,
 void check_peer( n2n_edge_t * eee,
                  uint8_t from_supernode,
                  const n2n_mac_t mac,
-                 const n2n_sock_t * peer );
+                 const n2n_sock_t * peer,
+                 const char * version,
+                 const char * os_name );
 void try_send_register( n2n_edge_t * eee,
                         uint8_t from_supernode,
                         const n2n_mac_t mac,
@@ -882,40 +887,39 @@ void try_send_register( n2n_edge_t * eee,
 
         memcpy(scan->mac_addr, mac, N2N_MAC_SIZE);
         scan->sock = *peer;
-        scan->last_seen = time(NULL); /* Don't change this it marks the pending peer for removal. */
+        scan->last_seen = time(NULL);
+
+        strncpy(scan->version, n2n_sw_version, sizeof(scan->version) - 1);
+        strncpy(scan->os_name, n2n_sw_osName, sizeof(scan->os_name) - 1);
 
         peer_list_add( &(eee->pending_peers), scan );
 
-        traceEvent( TRACE_DEBUG, "=== new pending %s -> %s",
-                    macaddr_str( mac_buf, scan->mac_addr ),
-                    sock_to_cstr( sockbuf, &(scan->sock) ) );
-
-        traceEvent( TRACE_INFO, "Pending peers list size=%u",
-                    (unsigned int)peer_list_size( eee->pending_peers ) );
-
-        /* trace Sending REGISTER */
-
         send_register(eee, &(scan->sock) );
 
-        /* pending_peers now owns scan. */
     } else {
     }
 }
-
 
 /** Update the last_seen time for this peer, or get registered. */
 void check_peer( n2n_edge_t * eee,
                  uint8_t from_supernode,
                  const n2n_mac_t mac,
-                 const n2n_sock_t * peer )
+                 const n2n_sock_t * peer,
+                 const char * version,
+                 const char * os_name )
 {
     struct peer_info * scan = find_peer_by_mac( eee->known_peers, mac );
 
     if ( NULL == scan ) {
-        /* Not in known_peers - start the REGISTER process. */
-        try_send_register( eee, from_supernode, mac, peer );
+        /* Create new peer entry with version/OS info */
+        scan = (struct peer_info*) calloc( 1, sizeof( struct peer_info ) );
+        memcpy(scan->mac_addr, mac, N2N_MAC_SIZE);
+        scan->sock = *peer;
+        strncpy(scan->version, version ? version : "unknown", sizeof(scan->version) - 1);
+        strncpy(scan->os_name, os_name ? os_name : "unknown", sizeof(scan->os_name) - 1);
+        peer_list_add( &(eee->known_peers), scan );
     } else {
-        /* Already in known_peers. */
+        /* Update existing peer */
         update_peer_address( eee, from_supernode, mac, peer, time(NULL) );
     }
 }
@@ -1059,6 +1063,13 @@ static void update_peer_address(n2n_edge_t * eee,
     {
         /* Not in known_peers. */
         return;
+    }
+
+    if (scan->version[0] == '\0') {
+        strncpy(scan->version, "unknown", sizeof(scan->version) - 1);
+    }
+    if (scan->os_name[0] == '\0') {
+        strncpy(scan->os_name, "unknown", sizeof(scan->os_name) - 1);
     }
 
     if ( 0 != sock_equal( &(scan->sock), peer))
@@ -1537,7 +1548,12 @@ static int handle_PACKET( n2n_edge_t * eee,
     }
 
     /* Update the sender in peer table entry */
-    check_peer( eee, from_supernode, pkt->srcMac, orig_sender );
+    struct peer_info *scan = find_peer_by_mac(eee->known_peers, pkt->srcMac);
+    if (NULL == scan) {
+        try_send_register(eee, from_supernode, pkt->srcMac, orig_sender);
+    } else {
+        update_peer_address(eee, from_supernode, pkt->srcMac, orig_sender, time(NULL));
+    }
 
     /* Handle transform. */
     {
@@ -1576,24 +1592,23 @@ static int handle_PACKET( n2n_edge_t * eee,
 
 /** Read a datagram from the management UDP socket and take appropriate
  *  action. */
-static void readFromMgmtSocket( n2n_edge_t * eee, int * keep_running )
-{
-    uint8_t             buf[N2N_PKT_BUF_SIZE];      /* Compete UDP packet */
-    ssize_t             recvlen;
-    _unused_ ssize_t    sendlen;
+static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
+    uint8_t udp_buf[N2N_PKT_BUF_SIZE];      /* Complete UDP packet */
+    ssize_t recvlen;
+    _unused_ ssize_t sendlen;
 #ifdef _WIN32
     struct sockaddr_storage sender_sock;
 #else
     struct sockaddr_un sender_sock;
 #endif
-    socklen_t           i;
-    size_t              msg_len;
-    time_t              now;
-    char                addr_buffer[108];
+    socklen_t i;
+    size_t msg_len;
+    time_t now;
+    char addr_buffer[108];
 
     now = time(NULL);
     i = sizeof(sender_sock);
-    recvlen=recvfrom( eee->mgmt_sock, buf, N2N_PKT_BUF_SIZE, 0/*flags*/,
+    recvlen = recvfrom(eee->mgmt_sock, udp_buf, N2N_PKT_BUF_SIZE, 0/*flags*/,
                       (struct sockaddr*) &sender_sock, &i);
     if (i > 0) {
 #ifndef _WIN32
@@ -1606,183 +1621,225 @@ static void readFromMgmtSocket( n2n_edge_t * eee, int * keep_running )
         }
 #endif
     }
-    if ( recvlen < 0 )
-    {
+    if (recvlen < 0) {
 #ifdef _WIN32
         W32_ERROR(WSAGetLastError(), c)
         traceEvent( TRACE_ERROR, "mgmt recvfrom failed with %ls", c );
         W32_ERROR_FREE(c)
 #else
-        traceEvent(TRACE_ERROR, "mgmt recvfrom failed with %s", strerror(errno) );
+        traceEvent(TRACE_ERROR, "mgmt recvfrom failed with %s", strerror(errno));
 #endif
-
         return; /* failed to receive data from UDP */
     }
 
-    if ( recvlen >= 4 )
-    {
-        if ( 0 == memcmp( buf, "stop", 4 ) )
-        {
-            traceEvent( TRACE_ERROR, "stop command received." );
+    /* Handle commands */
+    if (recvlen >= 4) {
+        if (0 == memcmp(udp_buf, "stop", 4)) {
+            traceEvent(TRACE_ERROR, "stop command received.");
             *keep_running = 0;
             return;
         }
 
-        if ( 0 == memcmp( buf, "help", 4 ) )
-        {
-            msg_len=0;
-
-            msg_len += snprintf( (char*)(buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                                 "Help for edge management console:\n"
-                                 "  stop    Gracefully exit edge\n"
-                                 "  help    This help message\n"
-                                 "  list    List peers\n"
-                                 "  +verb   Increase verbosity of logging\n"
-                                 "  -verb   Decrease verbosity of logging\n"
-                                 "  reload  Re-read the keyschedule\n"
-                                 "  <enter> Display statistics\n\n");
-
-            sendto( eee->mgmt_sock, buf, msg_len, 0/*flags*/,
-                    (struct sockaddr*) &sender_sock, i );
-
+        if (0 == memcmp(udp_buf, "help", 4)) {
+            msg_len = 0;
+            msg_len += snprintf((char*)(udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                "Help for edge management console:\n"
+                                "  stop    Gracefully exit edge\n"
+                                "  help    This help message\n"
+                                "  list    List peers\n"
+                                "  +verb   Increase verbosity of logging\n"
+                                "  -verb   Decrease verbosity of logging\n"
+                                "  reload  Re-read the keyschedule\n"
+                                "  <enter> Display statistics\n\n");
+            sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+                   (struct sockaddr*) &sender_sock, i);
             return;
         }
 
-        if ( 0 == memcmp (buf, "list", 4 ) )
-        {
-            msg_len=0;
-
+        if (0 == memcmp(udp_buf, "list", 4)) {
+            msg_len = 0;
             macstr_t mac;
             n2n_sock_str_t sockaddr;
             struct peer_info* peer = eee->pending_peers;
             while(peer) {
                 sock_to_cstr(sockaddr, &peer->sock);
-                msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                    "%s %s\n", macaddr_str(mac, peer->mac_addr), sockaddr
-                );
+                msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                    "%s %s\n", macaddr_str(mac, peer->mac_addr), sockaddr);
                 peer = peer->next;
             }
-            msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len), "-\n");
+            msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len), "-\n");
             peer = eee->known_peers;
             while(peer) {
                 sock_to_cstr(sockaddr, &peer->sock);
-                msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                    "%s %s\n", macaddr_str(mac, peer->mac_addr), sockaddr
-                );
+                msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                    "%s %s\n", macaddr_str(mac, peer->mac_addr), sockaddr);
                 peer = peer->next;
             }
-            sendto( eee->mgmt_sock, buf, msg_len, 0/*flags*/,
-                    (struct sockaddr*) &sender_sock, i );
+            sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+                   (struct sockaddr*) &sender_sock, i);
             return;
         }
-
     }
 
-    if ( recvlen >= 5 )
-    {
-        if ( 0 == memcmp( buf, "+verb", 5 ) )
-        {
-            msg_len=0;
+    if (recvlen >= 5) {
+        if (0 == memcmp(udp_buf, "+verb", 5)) {
+            msg_len = 0;
             ++traceLevel;
-
-            traceEvent( TRACE_ERROR, "+verb traceLevel=%d", traceLevel );
-            msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                                     "> +OK traceLevel=%d\n", traceLevel );
-
-            sendto( eee->mgmt_sock, buf, msg_len, 0/*flags*/,
-                    (struct sockaddr*) &sender_sock, i );
-
+            traceEvent(TRACE_ERROR, "+verb traceLevel=%d", traceLevel);
+            msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                "> +OK traceLevel=%d\n", traceLevel);
+            sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+                   (struct sockaddr*) &sender_sock, i);
             return;
         }
 
-        if ( 0 == memcmp( buf, "-verb", 5 ) )
-        {
-            msg_len=0;
-
-            if ( traceLevel > 0 )
-            {
+        if (0 == memcmp(udp_buf, "-verb", 5)) {
+            msg_len = 0;
+            if (traceLevel > 0) {
                 --traceLevel;
-                msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                                     "> -OK traceLevel=%d\n", traceLevel );
+                msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                    "> -OK traceLevel=%d\n", traceLevel);
+            } else {
+                msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                    "> -NOK traceLevel=%d\n", traceLevel);
             }
-            else
-            {
-                msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                                     "> -NOK traceLevel=%d\n", traceLevel );
-            }
-
-            traceEvent( TRACE_ERROR, "-verb traceLevel=%d", traceLevel );
-
-            sendto( eee->mgmt_sock, buf, msg_len, 0/*flags*/,
-                    (struct sockaddr*) &sender_sock, i );
+            traceEvent(TRACE_ERROR, "-verb traceLevel=%d", traceLevel);
+            sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+                   (struct sockaddr*) &sender_sock, i);
             return;
         }
     }
 
-    if ( recvlen >= 6 )
-    {
-        if ( 0 == memcmp( buf, "reload", 6 ) )
-        {
-            if ( strlen( eee->keyschedule ) > 0 )
-            {
-                if ( edge_init_keyschedule(eee) == 0 )
-                {
-                    msg_len=0;
-                    msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                                         "> OK\n" );
-                    sendto( eee->mgmt_sock, buf, msg_len, 0/*flags*/,
-                            (struct sockaddr*) &sender_sock, i );
+    if (recvlen >= 6) {
+        if (0 == memcmp(udp_buf, "reload", 6)) {
+            if (strlen(eee->keyschedule) > 0) {
+                if (edge_init_keyschedule(eee) == 0) {
+                    msg_len = 0;
+                    msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                        "> OK\n");
+                    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+                           (struct sockaddr*) &sender_sock, i);
                 }
                 return;
             }
         }
     }
 
-    traceEvent(TRACE_DEBUG, "mgmt status rq" );
+    traceEvent(TRACE_DEBUG, "mgmt status rq");
 
-    msg_len=0;
-    msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                         "Statistics for edge\n" );
+    /* Send community info */
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                       "community: %s\n", eee->community_name);
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
 
-    msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                         "uptime %ld\n",
-                         time(NULL) - eee->start_time );
+    /* Send header */
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                       "  id    mac                wan_ip                                            version   os\n");
+    msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                        "---v2.3-------------------------------------------------------------------------------v2.3---\n");
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
 
-    msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                         "paths  super:%u,%u p2p:%u,%u\n",
-                         (unsigned int) eee->tx_sup,
-             (unsigned int)eee->rx_sup,
-             (unsigned int)eee->tx_p2p,
-             (unsigned int)eee->rx_p2p );
+    /* Send PsP_with section */
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE, "PsP_with:\n");
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
 
-    msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                         "trans:null |%6u|%6u|\n"
-                         "trans:tf   |%6u|%6u|\n"
-                         "trans:aes  |%6u|%6u|\n",
-                         (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].tx_cnt,
-                         (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].rx_cnt,
-                         (unsigned int)eee->transop[N2N_TRANSOP_TF_IDX].tx_cnt,
-                         (unsigned int)eee->transop[N2N_TRANSOP_TF_IDX].rx_cnt,
-                         (unsigned int)eee->transop[N2N_TRANSOP_AESCBC_IDX].tx_cnt,
-                         (unsigned int)eee->transop[N2N_TRANSOP_AESCBC_IDX].rx_cnt );
+    macstr_t mac;
+    n2n_sock_str_t sockaddr;
+    struct peer_info* peer = eee->pending_peers;
+    int id = 1;
+    while(peer) {
+        sock_to_cstr(sockaddr, &peer->sock);
+        const char *version = (peer->version[0] != '\0') ? peer->version : "unknown";
+        const char *os_name = (peer->os_name[0] != '\0') ? peer->os_name : "unknown";
 
-    msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                         "peers  pend:%u full:%u\n",
-                         (unsigned int)peer_list_size( eee->pending_peers ),
-             (unsigned int)peer_list_size( eee->known_peers ) );
+        msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                           " %2u     %-17s  %-48s  %-8s  %s\n",
+                           id++,
+                           macaddr_str(mac, peer->mac_addr),
+                           sock_to_cstr(sockaddr, &peer->sock),
+                           version,
+                           os_name);
+        sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+               (struct sockaddr*) &sender_sock, i);
+        peer = peer->next;
+    }
 
-    msg_len += snprintf( (char*) (buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                         "last   super:%ld(%ld sec ago) p2p:%ld(%ld sec ago)\n",
-                         eee->last_sup, (now - eee->last_sup), eee->last_p2p, (now - eee->last_p2p) );
+    /* Send P2P_with section */
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE, "P2P_with:\n");
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
 
-    traceEvent(TRACE_DEBUG, "mgmt status sending: %s", buf );
+    peer = eee->known_peers;
+    id = 1;
+    while(peer) {
+        sock_to_cstr(sockaddr, &peer->sock);
+        const char *version = (peer->version[0] != '\0') ? peer->version : "unknown";
+        const char *os_name = (peer->os_name[0] != '\0') ? peer->os_name : "unknown";
 
+        msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                           " %2u     %-17s  %-48s  %-8s  %s\n",
+                           id++,
+                           macaddr_str(mac, peer->mac_addr),
+                           sock_to_cstr(sockaddr, &peer->sock),
+                           version,
+                           os_name);
+        sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+               (struct sockaddr*) &sender_sock, i);
+        peer = peer->next;
+    }
 
-    sendlen = sendto( eee->mgmt_sock, buf, msg_len, 0/*flags*/,
-                      (struct sockaddr*) &sender_sock, i );
+    /* Send supernode info */
+    const char* ip_version = "IPv4";
+    if (eee->supernode.family == AF_INET6) {
+        ip_version = "IPv6";
+    }
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE, "Supernodes\n");
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                       "  l* |  %s | v%s | %s\n",
+                       sock_to_cstr(sockaddr, &eee->supernode),
+                       eee->supernode_version,
+                       ip_version);
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
 
-    if (sendlen != msg_len)
-        traceEvent(TRACE_DEBUG, "mgmt status sending: %ld: %s", sendlen, strerror(errno) );
+    /* Send statistics */
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                       "---v2.3-------------------------------------------------------------------------------v2.3---\n");
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
+
+    time_t uptime = now - eee->start_time;
+    int days = uptime / 86400;
+    int hours = (uptime % 86400) / 3600;
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                       "uptime %d_%dh | pend/known_peers %u/%u | last_super/p2p %lu/%lus ago\n",
+                       days, hours,
+                       (unsigned int)peer_list_size(eee->pending_peers),
+                       (unsigned int)peer_list_size(eee->known_peers),
+                       (now - eee->last_sup), (now - eee->last_p2p));
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
+
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                       "transop %u,%u | super %u,%u | p2p %u,%u\n",
+                       (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].tx_cnt,
+                       (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].rx_cnt,
+                       (unsigned int)eee->tx_sup,
+                       (unsigned int)eee->rx_sup,
+                       (unsigned int)eee->tx_p2p,
+                       (unsigned int)eee->rx_p2p);
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
+
+    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                       "\nType \"help\" to see more commands.\n");
+    sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+           (struct sockaddr*) &sender_sock, i);
 }
 
 /** Read a datagram from the main UDP socket to the internet. */
@@ -1790,8 +1847,7 @@ static void readFromIPSocket( n2n_edge_t * eee )
 {
     n2n_common_t        cmn; /* common fields in the packet header */
 
-		static int first_super_ack_shown = 0;
-		static int first_ok_message_shown = 0;
+		  static int first_ok_message_shown = 0;
 
     n2n_sock_str_t      sockbuf1;
     n2n_sock_str_t      sockbuf2; /* don't clobber sockbuf1 if writing two addresses to trace */
@@ -1902,7 +1958,12 @@ static void readFromIPSocket( n2n_edge_t * eee )
 
             if ( 0 == memcmp(reg.dstMac, (eee->device.mac_addr), 6) )
             {
-                check_peer( eee, from_supernode, reg.srcMac, orig_sender );
+																struct peer_info *scan = find_peer_by_mac(eee->known_peers, reg.srcMac);
+																if (NULL == scan) {
+  																  try_send_register(eee, from_supernode, reg.srcMac, &sender);
+																} else {
+    																update_peer_address(eee, from_supernode, reg.srcMac, &sender, time(NULL));
+																}
             }
 
             send_register_ack(eee, orig_sender, &reg);
@@ -1941,21 +2002,6 @@ static void readFromIPSocket( n2n_edge_t * eee )
                     orig_sender = &(ra.sock);
                 }
 
-								if (first_super_ack_shown == 0) {
-										traceEvent(TRACE_DEBUG, "Rx REGISTER_SUPER_ACK myMAC=%s [%s] (external %s). Attempts %u",
-															 macaddr_str( mac_buf1, ra.edgeMac ),
-															 sock_to_cstr( sockbuf1, &sender ),
-															 sock_to_cstr( sockbuf2, orig_sender ),
-															 (unsigned int)eee->sup_attempts );
-										first_super_ack_shown = 1;
-								} else {
-										traceEvent(TRACE_DEBUG, "Rx REGISTER_SUPER_ACK myMAC=%s [%s] (external %s). Attempts %u",
-															 macaddr_str( mac_buf1, ra.edgeMac ),
-															 sock_to_cstr( sockbuf1, &sender ),
-															 sock_to_cstr( sockbuf2, orig_sender ),
-															 (unsigned int)eee->sup_attempts );
-								}
-
                 if ( 0 == memcmp( ra.cookie, eee->last_cookie, N2N_COOKIE_SIZE ) )
                 {
                     if ( ra.num_sn > 0 )
@@ -1964,21 +2010,29 @@ static void readFromIPSocket( n2n_edge_t * eee )
                                    sock_to_cstr(sockbuf1, &(ra.sn_bak) ) );
                     }
 
-										eee->last_sup = now;
-										eee->sn_wait=0;
-										eee->sup_attempts = N2N_EDGE_SUP_ATTEMPTS; /* refresh because we got a response */
+								          		eee->last_sup = now;
+									          	eee->sn_wait=0;
+									          	eee->sup_attempts = N2N_EDGE_SUP_ATTEMPTS; /* refresh because we got a response */
 
-										if (first_ok_message_shown == 0) {
-												traceEvent(TRACE_NORMAL, "[OK] Edge Peer <<< =======64======= >>> Super Node");
-												first_ok_message_shown = 1;
-										} else {
-												traceEvent(TRACE_DEBUG, "[OK] Edge Peer <<< =======64======= >>> Super Node");
-										}
+									          	if (first_ok_message_shown == 0) {
+										          		traceEvent(TRACE_NORMAL, "[OK] Edge Peer <<< =======64======= >>> Super Node");
+												          first_ok_message_shown = 1;
+									          	} else {
+										          		traceEvent(TRACE_DEBUG, "[OK] Edge Peer <<< =======64======= >>> Super Node");
+								          		}
 
                     /* REVISIT: store sn_back */
                     eee->register_lifetime = ra.lifetime;
                     eee->register_lifetime = max( eee->register_lifetime, REGISTER_SUPER_INTERVAL_MIN );
                     eee->register_lifetime = min( eee->register_lifetime, REGISTER_SUPER_INTERVAL_MAX );
+
+                    /* Store supernode version - CRITICAL: Must be inside cookie check */
+                    if (strlen(ra.version) > 0) {
+                        strncpy(eee->supernode_version, ra.version, sizeof(eee->supernode_version) - 1);
+                        eee->supernode_version[sizeof(eee->supernode_version) - 1] = '\0';
+                    } else {
+                        strcpy(eee->supernode_version, "unknown");
+                    }
                 }
                 else
                 {

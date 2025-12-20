@@ -38,16 +38,6 @@ static void pearson_hash_256(uint8_t *out, const uint8_t *in, size_t len) {
     }
 }
 
-/* n2n_rand implementation for compatibility */
-static uint64_t n2n_rand(void) {
-    static uint64_t seed = 0;
-    if (seed == 0) {
-        seed = time(NULL) ^ getpid();
-    }
-    seed = seed * 1103515245 + 12345;
-    return seed;
-}
-
 /* Modified setup_speck_key function using pearson_hash_256 */
 int setup_speck_key(void *priv, const uint8_t *encrypt_key, size_t encrypt_key_len) {
     transop_speck_t *speck_priv = (transop_speck_t *)priv;
@@ -78,16 +68,12 @@ int transop_deinit_speck(n2n_trans_op_t *arg) {
     return 0;
 }
 
-/* Generate IV using n2n_rand for compatibility */
+/* Generate IV using secure random number generation */
 static void set_speck_iv(transop_speck_t *priv, uint8_t *ivec) {
-    /* Keep in mind the following condition: N2N_SPECK_NONCE_SIZE % sizeof(rand_value) == 0 ! */
-    uint64_t rand_value;
-    uint8_t i;
-
-    for (i = 0; i < N2N_SPECK_NONCE_SIZE; i += sizeof(rand_value)) {
-        rand_value = n2n_rand();
-        memcpy(ivec + i, &rand_value, sizeof(rand_value));
-    }
+    struct random_ctx ctx;
+    random_init(&ctx);
+    random_bytes(&ctx, ivec, N2N_SPECK_NONCE_SIZE);
+    random_free(&ctx);
 }
 
 ssize_t transop_encode_speck(n2n_trans_op_t *arg,

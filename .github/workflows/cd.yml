@@ -269,12 +269,7 @@ jobs:
 
           nmake
           .\edge.exe -h || true
-          if (Test-Path ".\supernode.exe") {
-            .\supernode.exe -h || true
-          } else {
-            Write-Host "supernode.exe build failed, continuing with edge.exe only"
-          }
-
+          .\supernode.exe -h
       - name: Windows build
         if: runner.os == 'windows' && !endsWith(matrix.TARGET, '_AES')
         shell: pwsh
@@ -292,11 +287,7 @@ jobs:
 
           nmake
           .\edge.exe -h || true
-          if (Test-Path ".\supernode.exe") {
-            .\supernode.exe -h || true
-          } else {
-            Write-Host "supernode.exe build failed, continuing with edge.exe only"
-          }
+          .\supernode.exe -h
 
       - name: Install UPX
         if: runner.os == 'Linux' && !contains(matrix.TARGET, 'windows') && !contains(matrix.TARGET, 'apple-darwin')

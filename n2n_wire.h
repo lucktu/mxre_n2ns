@@ -1,4 +1,4 @@
-/* (c) 2009 Richard Andrews <andrews@ntop.org> 
+/* (c) 2009 Richard Andrews <andrews@ntop.org>
  *
  * Contributions by:
  *    Luca Deri
@@ -28,7 +28,8 @@
 #define N2N_COMMUNITY_SIZE              16
 #define N2N_MAC_SIZE                    6
 #define N2N_COOKIE_SIZE                 4
-#define N2N_PKT_BUF_SIZE                2048
+#define N2N_PKT_BUF_SIZE                2048    /* Peer capacity on edge */
+#define N2N_SN_PKTBUF_SIZE              2048    /* Peer capacity on supernode */
 #define N2N_SOCKBUF_SIZE                64      /* string representation of INET or INET6 sockets */
 
 typedef uint8_t n2n_community_t[N2N_COMMUNITY_SIZE];
@@ -77,11 +78,11 @@ typedef uint16_t n2n_flags_t;
 typedef uint16_t n2n_transform_t;       /* Encryption, compression type. */
 typedef uint32_t n2n_sa_t;              /* security association number */
 
-struct n2n_sock 
+struct n2n_sock
 {
     uint8_t     family;         /* AF_INET or AF_INET6; or 0 if invalid */
     uint16_t    port;           /* host order */
-    union 
+    union
     {
     uint8_t     v6[IPV6_SIZE];  /* byte sequence */
     uint8_t     v4[IPV4_SIZE];  /* byte sequence */
@@ -117,6 +118,8 @@ struct n2n_REGISTER
     n2n_mac_t           srcMac;         /* MAC of registering party */
     n2n_mac_t           dstMac;         /* MAC of target edge */
     n2n_sock_t          sock;           /* REVISIT: unused? */
+    char                version[16];    /* edge version string */
+    char                os_name[16];    /* operating system name */
 };
 
 typedef struct n2n_REGISTER n2n_REGISTER_t;
@@ -148,6 +151,8 @@ struct n2n_REGISTER_SUPER
     n2n_cookie_t        cookie;         /* Link REGISTER_SUPER and REGISTER_SUPER_ACK */
     n2n_mac_t           edgeMac;        /* MAC to register with edge sending socket */
     n2n_auth_t          auth;           /* Authentication scheme and tokens */
+    char                version[16];    /* edge version string */
+    char                os_name[16];    /* operating system name */
 };
 
 typedef struct n2n_REGISTER_SUPER n2n_REGISTER_SUPER_t;
@@ -161,7 +166,7 @@ struct n2n_REGISTER_SUPER_ACK
     uint16_t            lifetime;       /* How long the registration will live */
     n2n_sock_t          sock;           /* Sending sockets associated with edgeMac */
 
-    /* The packet format provides additional supernode definitions here. 
+    /* The packet format provides additional supernode definitions here.
      * uint8_t count, then for each count there is one
      * n2n_sock_t.
      */
@@ -169,6 +174,8 @@ struct n2n_REGISTER_SUPER_ACK
                                          * even if we cannot store them all. If
                                          * non-zero then sn_bak is valid. */
     n2n_sock_t          sn_bak;         /* Socket of the first backup supernode */
+    char                version[16];    /* supernode version string */
+    char                os_name[16];    /* supernode OS name */
 
 };
 
@@ -193,7 +200,7 @@ struct n2n_buf
 
 typedef struct n2n_buf n2n_buf_t;
 
-size_t encode_uint8( uint8_t * base, 
+size_t encode_uint8( uint8_t * base,
                   size_t * idx,
                   const uint8_t v );
 
@@ -202,7 +209,7 @@ size_t decode_uint8( uint8_t * out,
                   size_t * rem,
                   size_t * idx );
 
-size_t encode_uint16( uint8_t * base, 
+size_t encode_uint16( uint8_t * base,
                    size_t * idx,
                    const uint16_t v );
 
@@ -211,7 +218,7 @@ size_t decode_uint16( uint16_t * out,
                    size_t * rem,
                    size_t * idx );
 
-size_t encode_uint32( uint8_t * base, 
+size_t encode_uint32( uint8_t * base,
                    size_t * idx,
                    const uint32_t v );
 
@@ -220,9 +227,9 @@ size_t decode_uint32( uint32_t * out,
                    size_t * rem,
                    size_t * idx );
 
-size_t encode_buf( uint8_t * base, 
+size_t encode_buf( uint8_t * base,
                 size_t * idx,
-                const void * p, 
+                const void * p,
                 size_t s);
 
 size_t decode_buf( uint8_t * out,
@@ -231,7 +238,7 @@ size_t decode_buf( uint8_t * out,
                 size_t * rem,
                 size_t * idx );
 
-size_t encode_mac( uint8_t * base, 
+size_t encode_mac( uint8_t * base,
                 size_t * idx,
                 const n2n_mac_t m );
 
@@ -240,7 +247,7 @@ size_t decode_mac( uint8_t * out, /* of size N2N_MAC_SIZE. This clearer than pas
                 size_t * rem,
                 size_t * idx );
 
-ssize_t encode_common( uint8_t * base, 
+ssize_t encode_common( uint8_t * base,
                    size_t * idx,
                    const n2n_common_t * common );
 
@@ -249,7 +256,7 @@ ssize_t decode_common( n2n_common_t * out,
                    size_t * rem,
                    size_t * idx );
 
-ssize_t encode_sock( uint8_t * base, 
+ssize_t encode_sock( uint8_t * base,
                  size_t * idx,
                  const n2n_sock_t * sock );
 
@@ -258,9 +265,9 @@ ssize_t decode_sock( n2n_sock_t * sock,
                  size_t * rem,
                  size_t * idx );
 
-size_t encode_REGISTER( uint8_t * base, 
+size_t encode_REGISTER( uint8_t * base,
                      size_t * idx,
-                     const n2n_common_t * common, 
+                     const n2n_common_t * common,
                      const n2n_REGISTER_t * reg );
 
 size_t decode_REGISTER( n2n_REGISTER_t * pkt,
@@ -269,9 +276,9 @@ size_t decode_REGISTER( n2n_REGISTER_t * pkt,
                      size_t * rem,
                      size_t * idx );
 
-size_t encode_REGISTER_SUPER( uint8_t * base, 
+size_t encode_REGISTER_SUPER( uint8_t * base,
                            size_t * idx,
-                           const n2n_common_t * common, 
+                           const n2n_common_t * common,
                            const n2n_REGISTER_SUPER_t * reg );
 
 size_t decode_REGISTER_SUPER( n2n_REGISTER_SUPER_t * pkt,
@@ -280,9 +287,9 @@ size_t decode_REGISTER_SUPER( n2n_REGISTER_SUPER_t * pkt,
                            size_t * rem,
                            size_t * idx );
 
-size_t encode_REGISTER_ACK( uint8_t * base, 
+size_t encode_REGISTER_ACK( uint8_t * base,
                          size_t * idx,
-                         const n2n_common_t * common, 
+                         const n2n_common_t * common,
                          const n2n_REGISTER_ACK_t * reg );
 
 size_t decode_REGISTER_ACK( n2n_REGISTER_ACK_t * pkt,
@@ -302,13 +309,13 @@ size_t decode_REGISTER_SUPER_ACK( n2n_REGISTER_SUPER_ACK_t * reg,
                                size_t * rem,
                                size_t * idx );
 
-int fill_sockaddr( struct sockaddr * addr, 
-                   size_t addrlen, 
+int fill_sockaddr( struct sockaddr * addr,
+                   size_t addrlen,
                    const n2n_sock_t * sock );
 
-size_t encode_PACKET( uint8_t * base, 
+size_t encode_PACKET( uint8_t * base,
                    size_t * idx,
-                   const n2n_common_t * common, 
+                   const n2n_common_t * common,
                    const n2n_PACKET_t * pkt );
 
 size_t decode_PACKET( n2n_PACKET_t * pkt,

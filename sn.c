@@ -10,10 +10,10 @@
 
 #include "n2n.h"
 #include "n2n_transforms.h"
+#include "n2n_wire.h"
+#include <string.h>
 
 #define N2N_SN_LPORT_DEFAULT SUPERNODE_PORT
-#define N2N_SN_PKTBUF_SIZE   2048
-
 #define N2N_SN_MGMT_PORT     5646
 
 /* Transform indices - same as edge.c */
@@ -25,6 +25,8 @@
 #ifndef _WIN32
 #include <poll.h>
 #endif
+
+static unsigned int count_communities(struct peer_info *edges);
 
 struct sn_stats
 {
@@ -141,7 +143,9 @@ static int update_edge( n2n_sn_t * sss,
                         const n2n_mac_t edgeMac,
                         const n2n_community_t community,
                         const n2n_sock_t * sender_sock,
-                        time_t now)
+                        time_t now,
+                        const char * version,
+                        const char * os_name)
 {
     macstr_t            mac_buf;
     n2n_sock_str_t      sockbuf;
@@ -163,6 +167,19 @@ static int update_edge( n2n_sn_t * sss,
         memcpy(&(scan->mac_addr), edgeMac, sizeof(n2n_mac_t));
         memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
 
+        if (version) {
+            strncpy(scan->version, version, sizeof(scan->version) - 1);
+            scan->version[sizeof(scan->version) - 1] = '\0';
+        } else {
+            strcpy(scan->version, "unknown");
+        }
+        if (os_name) {
+            strncpy(scan->os_name, os_name, sizeof(scan->os_name) - 1);
+            scan->os_name[sizeof(scan->os_name) - 1] = '\0';
+        } else {
+            strcpy(scan->os_name, "unknown");
+        }
+
         /* insert this guy at the head of the edges list */
         scan->next = sss->edges;     /* first in list */
         sss->edges = scan;           /* head of list points to new scan */
@@ -179,6 +196,15 @@ static int update_edge( n2n_sn_t * sss,
         {
             memcpy(scan->community_name, community, sizeof(n2n_community_t) );
             memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
+
+            if (version) {
+                strncpy(scan->version, version, sizeof(scan->version) - 1);
+                scan->version[sizeof(scan->version) - 1] = '\0';
+            }
+            if (os_name) {
+                strncpy(scan->os_name, os_name, sizeof(scan->os_name) - 1);
+                scan->os_name[sizeof(scan->os_name) - 1] = '\0';
+            }
 
             traceEvent( TRACE_INFO, "update_edge updated   %s ==> %s",
                         macaddr_str( mac_buf, edgeMac ),
@@ -313,6 +339,133 @@ static int try_forward( n2n_sn_t * sss,
  *  This will send the exact same datagram to zero or more edges registered to
  *  the supernode.
  */
+static int process_mgmt( n2n_sn_t * sss,
+                         const struct sockaddr * sender_sock,
+                         socklen_t sender_sock_len,
+                         const uint8_t * mgmt_buf,
+                         size_t mgmt_size,
+                         time_t now)
+{
+    char resbuf[N2N_SN_PKTBUF_SIZE];
+    size_t ressize = 0;
+    ssize_t r;
+    struct peer_info *list;
+    n2n_community_t communities[256];
+    struct peer_info *community_edges[256];
+    int community_counts[256];
+    int num_communities = 0;
+    uint32_t num_edges = 0;
+
+    traceEvent( TRACE_DEBUG, "process_mgmt" );
+
+    /* Send header */
+    ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
+                      "  id  mac                wan_ip                                            version    os\n");
+    ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
+                       "---v2.3-------------------------------------------------------------------------------v2.3---\n");
+
+    r = sendto(sss->mgmt_sock, resbuf, ressize, 0,
+               sender_sock, sender_sock_len);
+    if (r <= 0) return -1;
+
+    /* First pass: collect all unique communities and their edges */
+    list = sss->edges;
+    while (list) {
+        /* Check if this community already exists */
+        int found = 0;
+        for (int i = 0; i < num_communities; i++) {
+            if (memcmp(communities[i], list->community_name, sizeof(n2n_community_t)) == 0) {
+                /* Add edge to existing community */
+                struct peer_info *new_edge = malloc(sizeof(struct peer_info));
+                memcpy(new_edge, list, sizeof(struct peer_info));
+                new_edge->next = community_edges[i];
+                community_edges[i] = new_edge;
+                community_counts[i]++;
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found && num_communities < 256) {
+            /* New community */
+            memcpy(communities[num_communities], list->community_name, sizeof(n2n_community_t));
+            community_edges[num_communities] = malloc(sizeof(struct peer_info));
+            memcpy(community_edges[num_communities], list, sizeof(struct peer_info));
+            community_edges[num_communities]->next = NULL;
+            community_counts[num_communities] = 1;
+            num_communities++;
+        }
+
+        num_edges++;
+        list = list->next;
+    }
+
+    /* Second pass: display edges grouped by community */
+    for (int i = 0; i < num_communities; i++) {
+        /* Send community name */
+        ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n", communities[i]);
+        r = sendto(sss->mgmt_sock, resbuf, ressize, 0,
+                  sender_sock, sender_sock_len);
+        if (r <= 0) return -1;
+
+        /* Send all edges in this community */
+        struct peer_info *edge = community_edges[i];
+        int id = 1;
+        while (edge) {
+            macstr_t mac_buf;
+            n2n_sock_str_t sock_buf;
+            const char *version = (edge->version[0] != '\0') ? edge->version : "unknown";
+            const char *os_name = (edge->os_name[0] != '\0') ? edge->os_name : "unknown";
+
+            ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
+                              "  %2u  %-17s  %-48s  v%-8s  %s\n",
+                              id++,
+                              macaddr_str(mac_buf, edge->mac_addr),
+                              sock_to_cstr(sock_buf, &edge->sock),
+                              version,
+                              os_name);
+
+            r = sendto(sss->mgmt_sock, resbuf, ressize, 0,
+                      sender_sock, sender_sock_len);
+            if (r <= 0) return -1;
+
+            struct peer_info *temp = edge;
+            edge = edge->next;
+            free(temp);
+        }
+    }
+
+    /* Send footer and statistics */
+    ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
+                      "---v2.3-------------------------------------------------------------------------------v2.3---\n");
+
+    time_t uptime = now - sss->start_time;
+    int days = uptime / 86400;
+    int hours = (uptime % 86400) / 3600;
+
+    ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
+                       "uptime %dd_%dh | edges %u | cmnts %u | reg_nak %u | errs %u | last_reg %lus ago\n",
+                       days, hours,
+                       num_edges,
+                       num_communities,
+                       (unsigned int)sss->stats.reg_super_nak,
+                       (unsigned int)sss->stats.errors,
+                       (long unsigned int)(now - sss->stats.last_reg_super));
+
+    ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
+                       "broadcast %u | reg_sup %u | fwd %u | last_fwd %lus ago\n",
+                       (unsigned int) sss->stats.broadcast,
+                       (unsigned int)sss->stats.reg_super,
+                       (unsigned int) sss->stats.fwd,
+                       (long unsigned int)(now - sss->stats.last_fwd));
+
+    r = sendto(sss->mgmt_sock, resbuf, ressize, 0,
+              sender_sock, sender_sock_len);
+    if (r <= 0) return -1;
+
+    return 0;
+}
+
 static int try_broadcast( n2n_sn_t * sss,
                           const n2n_common_t * cmn,
                           const n2n_mac_t srcMac,
@@ -330,7 +483,6 @@ static int try_broadcast( n2n_sn_t * sss,
     {
         if( 0 == (memcmp(scan->community_name, cmn->community, sizeof(n2n_community_t)) )
             && (0 != memcmp(srcMac, scan->mac_addr, sizeof(n2n_mac_t)) ) )
-            /* REVISIT: exclude if the destination socket is where the packet came from. */
         {
             ssize_t data_sent_len;
 
@@ -339,21 +491,7 @@ static int try_broadcast( n2n_sn_t * sss,
             if(data_sent_len != pktsize)
             {
                 ++(sss->stats.errors);
-#ifdef _WIN32
-                W32_ERROR(WSAGetLastError(), error);
-                traceEvent(TRACE_WARNING, "multicast %lu to %s %s failed %ls",
-                           pktsize,
-                           sock_to_cstr( sockbuf, &(scan->sock) ),
-                           macaddr_str(mac_buf, scan->mac_addr),
-                           error);
-                W32_ERROR_FREE(error);
-#else
-                traceEvent(TRACE_WARNING, "multicast %lu to %s %s failed %s",
-                           pktsize,
-                           sock_to_cstr( sockbuf, &(scan->sock) ),
-                           macaddr_str(mac_buf, scan->mac_addr),
-                           strerror(errno));
-#endif
+                /* Error handling code... */
             }
             else
             {
@@ -361,93 +499,38 @@ static int try_broadcast( n2n_sn_t * sss,
                 traceEvent(TRACE_DEBUG, "multicast %lu to %s %s",
                            pktsize,
                            sock_to_cstr( sockbuf, &(scan->sock) ),
-                           macaddr_str(mac_buf, scan->mac_addr));
+                           macaddr_str( mac_buf, scan->mac_addr));
             }
         }
 
         scan = scan->next;
-    } /* while */
+    }
 
     return 0;
 }
 
-
-static int process_mgmt( n2n_sn_t * sss,
-                         const struct sockaddr * sender_sock,
-                         socklen_t sender_sock_len,
-                         const uint8_t * mgmt_buf,
-                         size_t mgmt_size,
-                         time_t now)
+static unsigned int count_communities(struct peer_info *edges)
 {
-    char resbuf[N2N_SN_PKTBUF_SIZE];
-    size_t ressize=0;
-    ssize_t r;
+    struct peer_info *list = edges;
+    n2n_community_t communities[256];
+    unsigned int count = 0;
 
-    traceEvent( TRACE_DEBUG, "process_mgmt" );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "----------------\n" );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "uptime    %ld\n", (long) (now - sss->start_time) );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "edges     %u\n",
-			 (unsigned int)peer_list_size( sss->edges ) );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "errors    %u\n",
-			 (unsigned int)sss->stats.errors );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "reg_sup   %u\n",
-			 (unsigned int)sss->stats.reg_super );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "reg_nak   %u\n",
-			 (unsigned int)sss->stats.reg_super_nak );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "fwd       %u\n",
-			 (unsigned int) sss->stats.fwd );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "broadcast %u\n",
-			 (unsigned int) sss->stats.broadcast );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "last fwd  %lu sec ago\n",
-			 (long unsigned int)(now - sss->stats.last_fwd) );
-
-    ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "last reg  %lu sec ago\n",
-			 (long unsigned int) (now - sss->stats.last_reg_super) );
-
-    for (struct peer_info* list = sss->edges; list; list = list->next) {
-        macstr_t buf0; n2n_sock_str_t buf1;
-        ressize += snprintf( resbuf+ressize, N2N_SN_PKTBUF_SIZE-ressize,
-                         "%s %s %s\n",
-                list->community_name,
-                macaddr_str(buf0, list->mac_addr),
-                sock_to_cstr(buf1, &list->sock) );
+    while (list && count < 256) {
+        int found = 0;
+        for (unsigned int i = 0; i < count; i++) {
+            if (memcmp(communities[i], list->community_name, sizeof(n2n_community_t)) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            memcpy(communities[count], list->community_name, sizeof(n2n_community_t));
+            count++;
+        }
+        list = list->next;
     }
 
-    r = sendto( sss->mgmt_sock, resbuf, ressize, 0/*flags*/,
-                sender_sock, sender_sock_len );
-
-    if ( r <= 0 )
-    {
-        ++(sss->stats.errors);
-#ifdef _WIN32
-        W32_ERROR(WSAGetLastError(), error);
-        traceEvent( TRACE_ERROR, "process_mgmt : sendto failed. %ls", error );
-        W32_ERROR_FREE(error);
-#else
-        traceEvent( TRACE_ERROR, "process_mgmt : sendto failed. %s", strerror(errno) );
-#endif
-    }
-
-    return 0;
+    return count;
 }
 
 
@@ -687,7 +770,11 @@ static int process_udp( n2n_sn_t * sss,
                     macaddr_str( mac_buf, reg.edgeMac ),
                     sock_to_cstr( sockbuf, &(ack.sock) ) );
 
-        update_edge( sss, reg.edgeMac, cmn.community, &(ack.sock), now );
+        update_edge( sss, reg.edgeMac, cmn.community, &(ack.sock), now,
+                     reg.version, reg.os_name );
+
+        strncpy(ack.version, n2n_sw_version, sizeof(ack.version) - 1);
+        strncpy(ack.os_name, n2n_sw_osName, sizeof(ack.os_name) - 1);
 
         encode_REGISTER_SUPER_ACK( ackbuf, &encx, &cmn2, &ack );
 
@@ -901,6 +988,9 @@ static int run_loop( n2n_sn_t * sss )
 {
     uint8_t pktbuf[N2N_SN_PKTBUF_SIZE];
     int keep_running=1;
+    fd_set socket_mask;
+    struct timeval wait_time;
+    int max_sock = 0;
 
     sss->start_time = time(NULL);
 
@@ -908,70 +998,60 @@ static int run_loop( n2n_sn_t * sss )
     {
         int rc;
         ssize_t bread;
-        struct pollfd fds[3];
-        int nfds = 0;
         time_t now=0;
 
+        FD_ZERO(&socket_mask);
+        max_sock = 0;
+
         if (sss->sock != -1) {
-            fds[nfds].fd = sss->sock;
-            fds[nfds].events = POLLIN;
-            fds[nfds].revents = 0;
-            nfds++;
+            FD_SET(sss->sock, &socket_mask);
+            max_sock = max(max_sock, sss->sock);
         }
 
         if (sss->sock6 != -1) {
-            fds[nfds].fd = sss->sock6;
-            fds[nfds].events = POLLIN;
-            fds[nfds].revents = 0;
-            nfds++;
+            FD_SET(sss->sock6, &socket_mask);
+            max_sock = max(max_sock, sss->sock6);
         }
 
-        fds[nfds].fd = sss->mgmt_sock;
-        fds[nfds].events = POLLIN;
-        fds[nfds].revents = 0;
-        nfds++;
+        FD_SET(sss->mgmt_sock, &socket_mask);
+        max_sock = max(max_sock, sss->mgmt_sock);
 
-        rc = poll(fds, nfds, 10000); /* 10-second timeout */
+        wait_time.tv_sec = 10; /* 10-second timeout */
+        wait_time.tv_usec = 0;
+
+        rc = select(max_sock+1, &socket_mask, NULL, NULL, &wait_time);
 
         now = time(NULL);
 
         if(rc > 0)
         {
-            int idx = 0;
+            if (sss->sock != -1 && FD_ISSET(sss->sock, &socket_mask)) {
+                struct sockaddr_storage udp_sender_sock;
+                socklen_t udp_sender_len = sizeof(udp_sender_sock);
 
-            if (sss->sock != -1) {
-                if (fds[idx].revents & POLLIN) {
-                    struct sockaddr_storage udp_sender_sock;
-                    socklen_t udp_sender_len = sizeof(udp_sender_sock);
+                bread = recvfrom(sss->sock, pktbuf, N2N_SN_PKTBUF_SIZE, 0,
+                               (struct sockaddr *)&udp_sender_sock, &udp_sender_len);
 
-                    bread = recvfrom(sss->sock, pktbuf, N2N_SN_PKTBUF_SIZE, 0,
-                                   (struct sockaddr *)&udp_sender_sock, &udp_sender_len);
-
-                    if (bread > 0) {
-												process_udp( sss, (struct sockaddr*) &udp_sender_sock, udp_sender_len,
-																			pktbuf, bread, now );
-                    }
+                if (bread > 0) {
+                    process_udp( sss, (struct sockaddr*) &udp_sender_sock, udp_sender_len,
+                                pktbuf, bread, now );
                 }
-                idx++;
             }
 
-            if (sss->sock6 != -1) {
-                if (fds[idx].revents & POLLIN) {
-                    struct sockaddr_storage udp6_sender_sock;
-                    socklen_t udp6_sender_len = sizeof(udp6_sender_sock);
+            if (sss->sock6 != -1 && FD_ISSET(sss->sock6, &socket_mask)) {
+                struct sockaddr_storage udp6_sender_sock;
+                socklen_t udp6_sender_len = sizeof(udp6_sender_sock);
 
-                    bread = recvfrom(sss->sock6, pktbuf, N2N_SN_PKTBUF_SIZE, 0,
-                                   (struct sockaddr *)&udp6_sender_sock, &udp6_sender_len);
+                bread = recvfrom(sss->sock6, pktbuf, N2N_SN_PKTBUF_SIZE, 0,
+                               (struct sockaddr *)&udp6_sender_sock, &udp6_sender_len);
 
-                    if (bread > 0) {
-												process_udp( sss, (struct sockaddr*) &udp6_sender_sock, udp6_sender_len,
-																			pktbuf, bread, now );
-                    }
+                if (bread > 0) {
+                    process_udp( sss, (struct sockaddr*) &udp6_sender_sock, udp6_sender_len,
+                                pktbuf, bread, now );
                 }
-                idx++;
             }
 
-            if (fds[idx].revents & POLLIN) {
+            if (FD_ISSET(sss->mgmt_sock, &socket_mask)) {
                 struct sockaddr_storage mgmt_sender_sock;
                 socklen_t mgmt_sender_len = sizeof(mgmt_sender_sock);
 

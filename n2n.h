@@ -149,10 +149,11 @@ typedef struct route {
     uint8_t gateway[IPV6_SIZE];
 } route;
 
+#define N2N_MAX_TRANSFORMS      16
+
 /* N2N_IFNAMSIZ is needed on win32 even if dev_name is not used after declaration */
 #ifndef _WIN32
 #define N2N_IFNAMSIZ            16 /* 15 chars * NULL */
-#define N2N_MAX_TRANSFORMS      16
 
 typedef struct tuntap_dev {
   int             fd;
@@ -219,6 +220,8 @@ struct peer_info {
     n2n_mac_t           mac_addr;
     n2n_sock_t          sock;
     time_t              last_seen;
+    char                version[16];
+    char                os_name[16];
 };
 
 struct n2n_edge; /* defined in edge.c */
